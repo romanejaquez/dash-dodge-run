@@ -1,0 +1,5 @@
+{
+  "name": "Dash Dodge",
+  "description": "An infinite runner game featuring Dash, the Flutter mascot, built with Three.js.",
+  "requestFramePermissions": []
+}
