@@ -102,6 +102,24 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [isTopViewMain, setIsTopViewMain] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  const [canRestart, setCanRestart] = useState(true);
+  const canRestartRef = useRef(true);
+
+  // 3-second delay on WIN and GAMEOVER screens to prevent accidental restarts
+  useEffect(() => {
+    if (gameState === 'GAMEOVER' || gameState === 'WIN') {
+      setCanRestart(false);
+      canRestartRef.current = false;
+      const timer = setTimeout(() => {
+        setCanRestart(true);
+        canRestartRef.current = true;
+      }, 3000);
+      return () => clearTimeout(timer);
+    } else {
+      setCanRestart(true);
+      canRestartRef.current = true;
+    }
+  }, [gameState]);
 
   // Game refs
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -161,6 +179,7 @@ export default function App() {
   const audioHeartRef = useRef<HTMLAudioElement | null>(null);
   const audioJumpRef = useRef<HTMLAudioElement | null>(null);
   const audioFastRunningRef = useRef<HTMLAudioElement | null>(null);
+  const audioBgRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     audioCoinRef.current = new Audio('/dashcoin.mp3');
@@ -174,10 +193,31 @@ export default function App() {
     audioFlashRef.current = new Audio('/dashflash.mp3');
     audioHeartRef.current = new Audio('/dashheart.mp3');
     audioJumpRef.current = new Audio('/dashjump.mp3');
+    audioBgRef.current = new Audio('/bgmusic.mp3');
+    if (audioBgRef.current) {
+      audioBgRef.current.loop = true;
+      audioBgRef.current.volume = 0.5;
+    }
+
+    // Try playing background music immediately or on first user interaction (due to browser autoplay policies)
+    const playBgMusic = () => {
+      if (audioBgRef.current && audioBgRef.current.paused) {
+        audioBgRef.current.play().catch(() => {
+          // Autoplay policy may hold until user interaction
+        });
+      }
+    };
+
+    playBgMusic();
+    window.addEventListener('pointerdown', playBgMusic);
+    window.addEventListener('keydown', playBgMusic);
 
     return () => {
+      window.removeEventListener('pointerdown', playBgMusic);
+      window.removeEventListener('keydown', playBgMusic);
       audioRunningRef.current?.pause();
       audioFastRunningRef.current?.pause();
+      audioBgRef.current?.pause();
     };
   }, []);
 
@@ -192,7 +232,8 @@ export default function App() {
       audioFlashRef.current,
       audioHeartRef.current,
       audioJumpRef.current,
-      audioFastRunningRef.current
+      audioFastRunningRef.current,
+      audioBgRef.current
     ];
     audios.forEach(audio => {
       if (audio) audio.muted = isMuted;
@@ -535,27 +576,45 @@ export default function App() {
         const wrapper = new THREE.Group();
         wrapper.add(model);
 
-        // Normalize sign origin and scale
+        // Normalize sign origin and scale to be a visible landmark in the horizon
         const box = new THREE.Box3().setFromObject(model);
         const size = box.getSize(new THREE.Vector3());
-        const targetHeight = 15; // Even larger
+        const targetHeight = 55; // Increased from 35 to 55 units
         const scale = targetHeight / (size.y || 1);
         model.scale.set(scale, scale, scale);
         
-        // Center sign and place base at 0 relative to wrapper
+        // Center sign horizontally and place base at 0 relative to wrapper
+        model.updateMatrixWorld(true);
         const scaledBox = new THREE.Box3().setFromObject(model);
         model.position.y = -scaledBox.min.y;
         model.position.x = -(scaledBox.max.x + scaledBox.min.x) / 2;
         model.position.z = -(scaledBox.max.z + scaledBox.min.z) / 2;
         
-        // Position it closer and slightly above ground to be clearly visible
-        wrapper.position.set(0, 0.5, 0);
-        wrapper.rotation.y = Math.PI; // Face the player
+        // Position at the end of the road in the horizon facing the player (10 units higher)
+        wrapper.position.set(0, 10.5, -150);
+        wrapper.rotation.y = 0; // Front faces +Z towards the camera and player
+        wrapper.scale.set(1, 1, 1);
         
-        // Make it large but not astronomical
-        wrapper.scale.set(4, 4, 4);
-        
-        processModel(model, false, true); // Use isPlayer=true to skip material simplification and keep textures
+        // Preserve authentic model materials and colors without smoothing sharp bevel edges
+        model.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            const mesh = child as THREE.Mesh;
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            if (mesh.material) {
+              const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+              materials.forEach(m => {
+                m.side = THREE.DoubleSide;
+                if (m instanceof THREE.MeshStandardMaterial) {
+                  m.roughness = 0.35;
+                  m.metalness = 0.05;
+                  m.needsUpdate = true;
+                }
+              });
+            }
+          }
+        });
+
         scene.add(wrapper);
         signRef.current = wrapper;
       },
@@ -795,32 +854,6 @@ export default function App() {
     };
   }, []);
 
-  // Controls
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (gameState !== 'PLAYING') return;
-
-      if (e.key === 'ArrowLeft' || e.key === 'a') {
-        playerLane.current = Math.max(0, playerLane.current - 1);
-      } else if (e.key === 'ArrowRight' || e.key === 'd') {
-        playerLane.current = Math.min(2, playerLane.current + 1);
-      } else if ((e.key === 'ArrowUp' || e.key === ' ' || e.key === 'w') && !isJumping.current) {
-        playerVelocityY.current = JUMP_FORCE;
-        isJumping.current = true;
-        
-        // Play jump sound and pause running sounds
-        if (audioJumpRef.current) {
-          audioJumpRef.current.currentTime = 0;
-          audioJumpRef.current.play().catch(e => console.error("Audio play failed:", e));
-        }
-        audioRunningRef.current?.pause();
-        audioFastRunningRef.current?.pause();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [gameState]);
 
   const spawnTree = (zPos = -100) => {
     if (!sceneRef.current) return;
@@ -1003,15 +1036,60 @@ export default function App() {
     cloudsRef.current = [];
 
     if (signRef.current) {
-      signRef.current.position.z = 0;
-      signRef.current.position.y = 0.5;
+      signRef.current.position.set(0, 10.5, -150);
     }
 
     spawnInitialTrees();
     spawnInitialClouds();
     spawnInitialObstacles();
     setGameState('PLAYING');
+    if (audioBgRef.current && audioBgRef.current.paused) {
+      audioBgRef.current.play().catch(() => {});
+    }
   };
+
+  // Controls & Keyboard Listeners
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Allow space bar to start or restart the game on START, WIN, or GAMEOVER screens
+      if (gameState === 'START' || gameState === 'WIN' || gameState === 'GAMEOVER') {
+        if ((e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar') && !loading) {
+          e.preventDefault();
+          if (!e.repeat) {
+            // Block spacebar restart if still in the 3-second lockout window
+            if ((gameState === 'WIN' || gameState === 'GAMEOVER') && !canRestartRef.current) {
+              return;
+            }
+            resetGame();
+          }
+        }
+        return;
+      }
+
+      if (gameState !== 'PLAYING') return;
+
+      if (e.key === 'ArrowLeft' || e.key === 'a') {
+        playerLane.current = Math.max(0, playerLane.current - 1);
+      } else if (e.key === 'ArrowRight' || e.key === 'd') {
+        playerLane.current = Math.min(2, playerLane.current + 1);
+      } else if ((e.key === 'ArrowUp' || e.code === 'Space' || e.key === ' ' || e.key === 'w') && !isJumping.current) {
+        e.preventDefault();
+        playerVelocityY.current = JUMP_FORCE;
+        isJumping.current = true;
+        
+        // Play jump sound and pause running sounds
+        if (audioJumpRef.current) {
+          audioJumpRef.current.currentTime = 0;
+          audioJumpRef.current.play().catch(e => console.error("Audio play failed:", e));
+        }
+        audioRunningRef.current?.pause();
+        audioFastRunningRef.current?.pause();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [gameState, loading]);
 
   // Game Loop
   useEffect(() => {
@@ -1545,6 +1623,9 @@ export default function App() {
                   referrerPolicy="no-referrer" 
                 />
               </button>
+              <div className="mt-3 text-xs text-white/70 tracking-wider font-mono uppercase">
+                Press <span className="px-2 py-0.5 rounded bg-white/20 text-white font-bold border border-white/30">Space</span> or Click to Start
+              </div>
             </div>
           </motion.div>
         )}
@@ -1569,12 +1650,43 @@ export default function App() {
               <div className="text-2xl md:text-4xl font-black mb-8 text-[#FFC107] uppercase">Score: {score}</div>
               
               <button 
-                onClick={resetGame}
-                className="px-8 py-3 bg-white text-black font-black rounded-2xl transition-all hover:scale-105 active:scale-95 flex items-center gap-3 mx-auto uppercase shadow-lg"
+                id="win-play-again-btn"
+                onClick={canRestart ? resetGame : undefined}
+                disabled={!canRestart}
+                className={`relative overflow-hidden px-8 py-3.5 rounded-2xl transition-all duration-300 flex items-center gap-3 mx-auto uppercase shadow-lg select-none ${
+                  canRestart 
+                    ? 'bg-white text-black font-black hover:scale-105 active:scale-95 cursor-pointer ring-2 ring-white/50' 
+                    : 'bg-white/20 text-white/40 font-black cursor-not-allowed'
+                }`}
               >
-                <RotateCcw size={20} />
-                Play Again
+                <RotateCcw size={20} className={canRestart ? '' : 'opacity-40'} />
+                <span>Play Again</span>
+                {!canRestart && (
+                  <motion.div 
+                    id="win-restart-progress-bar"
+                    initial={{ width: '0%' }}
+                    animate={{ width: '100%' }}
+                    transition={{ duration: 3, ease: 'linear' }}
+                    className="absolute bottom-0 left-0 h-1 bg-[#FFC107]"
+                  />
+                )}
               </button>
+              <div id="win-restart-hint" className="mt-4 text-xs font-mono uppercase h-6 flex items-center justify-center">
+                {canRestart ? (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 3 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="text-white/70 tracking-wider"
+                  >
+                    Press <span className="px-2 py-0.5 rounded bg-white/20 text-white font-bold border border-white/30">Space</span> or Click to Restart
+                  </motion.div>
+                ) : (
+                  <div className="text-white/40 tracking-wider flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#FFC107] animate-pulse"></span>
+                    <span>Reviewing results...</span>
+                  </div>
+                )}
+              </div>
             </div>
           </motion.div>
         )}
@@ -1598,12 +1710,43 @@ export default function App() {
               <div className="text-sm md:text-base font-black opacity-60 mb-8 uppercase tracking-widest">You scored {score} points</div>
               
               <button 
-                onClick={resetGame}
-                className="px-8 py-3 bg-white text-black font-black rounded-2xl transition-all hover:scale-105 active:scale-95 flex items-center gap-3 mx-auto uppercase shadow-lg"
+                id="gameover-try-again-btn"
+                onClick={canRestart ? resetGame : undefined}
+                disabled={!canRestart}
+                className={`relative overflow-hidden px-8 py-3.5 rounded-2xl transition-all duration-300 flex items-center gap-3 mx-auto uppercase shadow-lg select-none ${
+                  canRestart 
+                    ? 'bg-white text-black font-black hover:scale-105 active:scale-95 cursor-pointer ring-2 ring-white/50' 
+                    : 'bg-white/20 text-white/40 font-black cursor-not-allowed'
+                }`}
               >
-                <RotateCcw size={20} />
-                Try Again
+                <RotateCcw size={20} className={canRestart ? '' : 'opacity-40'} />
+                <span>Try Again</span>
+                {!canRestart && (
+                  <motion.div 
+                    id="gameover-restart-progress-bar"
+                    initial={{ width: '0%' }}
+                    animate={{ width: '100%' }}
+                    transition={{ duration: 3, ease: 'linear' }}
+                    className="absolute bottom-0 left-0 h-1 bg-[#FF5722]"
+                  />
+                )}
               </button>
+              <div id="gameover-restart-hint" className="mt-4 text-xs font-mono uppercase h-6 flex items-center justify-center">
+                {canRestart ? (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 3 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="text-white/70 tracking-wider"
+                  >
+                    Press <span className="px-2 py-0.5 rounded bg-white/20 text-white font-bold border border-white/30">Space</span> or Click to Restart
+                  </motion.div>
+                ) : (
+                  <div className="text-white/40 tracking-wider flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#FF5722] animate-pulse"></span>
+                    <span>Reviewing results...</span>
+                  </div>
+                )}
+              </div>
             </div>
           </motion.div>
         )}
@@ -1641,8 +1784,22 @@ export default function App() {
         />
       </div>
 
+      {/* FCL Logo */}
+      <div 
+        id="fcl-logo-container" 
+        className="absolute bottom-0 right-0 p-[32px] z-30 pointer-events-none select-none flex items-center justify-center"
+      >
+        <img 
+          id="fcl-logo-image"
+          src="/fcllogo.png" 
+          alt="FCL Logo" 
+          className="w-[150px] h-[75px] object-contain drop-shadow-md"
+          referrerPolicy="no-referrer"
+        />
+      </div>
+
       {/* Debug Info */}
-      <div className="absolute bottom-4 right-4 z-10 text-[10px] font-mono text-white/30 pointer-events-none">
+      <div id="debug-info" className="absolute bottom-2 left-4 z-10 text-[10px] font-mono text-white/30 pointer-events-none">
         {playerRef.current ? 'MODEL_READY' : 'MODEL_PENDING'} | {gameState}
       </div>
     </div>
